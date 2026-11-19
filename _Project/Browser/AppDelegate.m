@@ -22,6 +22,33 @@
 
 @implementation SceneDelegate
 
+- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions {
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(windowDidBecomeKey:)
+                                                 name:UIWindowDidBecomeKeyNotification
+                                               object:nil];
+}
+
+// When a site requests video fullscreen, WebKit creates its own window and
+// makes it key, but on tvOS the AVKit fullscreen transition fails ("feature
+// is not supported"). The empty, transparent window stays key and swallows
+// every remote touch and press, so the cursor stops working. Hide it and give
+// key status back to the browser window.
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    UIWindow *window = notification.object;
+    if (self.window == nil || window == self.window || window.windowScene != self.window.windowScene) {
+        return;
+    }
+    if (![window isMemberOfClass:UIWindow.class] || ![window.rootViewController isMemberOfClass:UIViewController.class]) {
+        return;
+    }
+    if (window.rootViewController.presentedViewController != nil) {
+        return;
+    }
+    window.hidden = YES;
+    [self.window makeKeyWindow];
+}
+
 - (AppDelegate *)appDelegate {
     return (AppDelegate *)UIApplication.sharedApplication.delegate;
 }

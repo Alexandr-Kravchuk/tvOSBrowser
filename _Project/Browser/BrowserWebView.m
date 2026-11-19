@@ -31,8 +31,17 @@ static void BrowserEnsureWebKitRuntimeLoaded(void) {
     });
 }
 
+// Never wait forever: if WebKit stops answering (for example after a failed
+// video fullscreen transition), an endless pump freezes the whole UI.
+static NSTimeInterval const kBrowserSyncWaitTimeout = 2.0;
+
 static void BrowserPumpRunLoopUntil(BOOL *done) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kBrowserSyncWaitTimeout];
     while (!*done) {
+        if ([deadline timeIntervalSinceNow] <= 0) {
+            NSLog(@"BrowserPumpRunLoopUntil timed out after %.1fs", kBrowserSyncWaitTimeout);
+            return;
+        }
         @autoreleasepool {
             [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
         }
@@ -445,6 +454,221 @@ static NSString *BrowserYouTubeRequestCaptureScript(void) {
     "})();";
 }
 
+static NSString *BrowserFullscreenEmulationScript(void) {
+    // tvOS has no AVKit video fullscreen for web content ("feature is not
+    // supported"), so emulate the Fullscreen API inside the page with CSS.
+    return
+    @"(function () {\n"
+    @"  if (window.__tvfsInstalled) { return; }\n"
+    @"  window.__tvfsInstalled = true;\n"
+    @"\n"
+    @"  var STYLE_ID = '__tvfs_style';\n"
+    @"  var current = null;\n"
+    @"  var savedScroll = null;\n"
+    @"\n"
+    @"  function ensureStyle() {\n"
+    @"    if (document.getElementById(STYLE_ID)) { return; }\n"
+    @"    var style = document.createElement('style');\n"
+    @"    style.id = STYLE_ID;\n"
+    @"    style.textContent =\n"
+    @"      '.__tvfs_active{position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;' +\n"
+    @"      'width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;' +\n"
+    @"      'margin:0!important;padding:0!important;border:0!important;transform:none!important;' +\n"
+    @"      'z-index:2147483647!important;background:#000!important}' +\n"
+    @"      '.__tvfs_active video,video.__tvfs_active{width:100%!important;height:100%!important;object-fit:contain!important}' +\n"
+    @"      'html.__tvfs_lock,html.__tvfs_lock body{overflow:hidden!important}';\n"
+    @"    (document.head || document.documentElement).appendChild(style);\n"
+    @"  }\n"
+    @"\n"
+    @"  function fire(element) {\n"
+    @"    ['fullscreenchange', 'webkitfullscreenchange'].forEach(function (name) {\n"
+    @"      try {\n"
+    @"        document.dispatchEvent(new Event(name, { bubbles: true }));\n"
+    @"        if (element) { element.dispatchEvent(new Event(name, { bubbles: true })); }\n"
+    @"      } catch (e) {}\n"
+    @"    });\n"
+    @"  }\n"
+    @"\n"
+    @"  function postToParent(kind) {\n"
+    @"    if (window.parent === window) { return; }\n"
+    @"    try { window.parent.postMessage({ __tvfs: kind }, '*'); } catch (e) {}\n"
+    @"  }\n"
+    @"\n"
+    @"  // overflow:hidden on <html> while in fullscreen resets the page scroll, so\n"
+    @"  // remember where the page was and put it back after leaving fullscreen.\n"
+    @"  function restoreScroll() {\n"
+    @"    var position = savedScroll;\n"
+    @"    savedScroll = null;\n"
+    @"    if (!position) { return; }\n"
+    @"    var apply = function () { window.scrollTo(position.x, position.y); };\n"
+    @"    apply();\n"
+    @"    if (window.requestAnimationFrame) { window.requestAnimationFrame(apply); }\n"
+    @"    setTimeout(apply, 100);\n"
+    @"  }\n"
+    @"\n"
+    @"  function exitRaw(notifyParent) {\n"
+    @"    var element = current;\n"
+    @"    if (!element) { return null; }\n"
+    @"    element.classList.remove('__tvfs_active');\n"
+    @"    document.documentElement.classList.remove('__tvfs_lock');\n"
+    @"    current = null;\n"
+    @"    restoreScroll();\n"
+    @"    if (element.tagName === 'IFRAME' && element.contentWindow) {\n"
+    @"      try { element.contentWindow.postMessage({ __tvfs: 'exitChild' }, '*'); } catch (e) {}\n"
+    @"    }\n"
+    @"    if (notifyParent) { postToParent('exit'); }\n"
+    @"    return element;\n"
+    @"  }\n"
+    @"\n"
+    @"  function enter(element) {\n"
+    @"    if (!element || current === element) { return; }\n"
+    @"    ensureStyle();\n"
+    @"    if (current) { exitRaw(false); }\n"
+    @"    savedScroll = { x: window.scrollX || window.pageXOffset || 0, y: window.scrollY || window.pageYOffset || 0 };\n"
+    @"    current = element;\n"
+    @"    element.classList.add('__tvfs_active');\n"
+    @"    document.documentElement.classList.add('__tvfs_lock');\n"
+    @"    postToParent('enter');\n"
+    @"    fire(element);\n"
+    @"  }\n"
+    @"\n"
+    @"  function exit(notifyParent) {\n"
+    @"    var element = exitRaw(notifyParent);\n"
+    @"    if (element) { fire(element); }\n"
+    @"  }\n"
+    @"\n"
+    @"  function defineGetter(target, name, getter) {\n"
+    @"    try { Object.defineProperty(target, name, { configurable: true, get: getter }); } catch (e) {}\n"
+    @"  }\n"
+    @"\n"
+    @"  defineGetter(Document.prototype, 'fullscreenElement', function () { return current; });\n"
+    @"  defineGetter(Document.prototype, 'webkitFullscreenElement', function () { return current; });\n"
+    @"  defineGetter(Document.prototype, 'webkitCurrentFullScreenElement', function () { return current; });\n"
+    @"  defineGetter(Document.prototype, 'fullscreenEnabled', function () { return true; });\n"
+    @"  defineGetter(Document.prototype, 'webkitFullscreenEnabled', function () { return true; });\n"
+    @"  defineGetter(Document.prototype, 'fullscreen', function () { return !!current; });\n"
+    @"  defineGetter(Document.prototype, 'webkitIsFullScreen', function () { return !!current; });\n"
+    @"\n"
+    @"  function requestFullscreen() { enter(this); return Promise.resolve(); }\n"
+    @"  Element.prototype.requestFullscreen = requestFullscreen;\n"
+    @"  Element.prototype.webkitRequestFullscreen = requestFullscreen;\n"
+    @"  Element.prototype.webkitRequestFullScreen = requestFullscreen;\n"
+    @"\n"
+    @"  function exitFullscreen() { exit(true); return Promise.resolve(); }\n"
+    @"  Document.prototype.exitFullscreen = exitFullscreen;\n"
+    @"  Document.prototype.webkitExitFullscreen = exitFullscreen;\n"
+    @"  Document.prototype.webkitCancelFullScreen = exitFullscreen;\n"
+    @"\n"
+    @"  if (window.HTMLVideoElement) {\n"
+    @"    HTMLVideoElement.prototype.webkitEnterFullscreen = function () { enter(this); };\n"
+    @"    HTMLVideoElement.prototype.webkitEnterFullScreen = HTMLVideoElement.prototype.webkitEnterFullscreen;\n"
+    @"    HTMLVideoElement.prototype.webkitExitFullscreen = function () { exit(true); };\n"
+    @"    HTMLVideoElement.prototype.webkitExitFullScreen = HTMLVideoElement.prototype.webkitExitFullscreen;\n"
+    @"    defineGetter(HTMLVideoElement.prototype, 'webkitSupportsFullscreen', function () { return true; });\n"
+    @"    defineGetter(HTMLVideoElement.prototype, 'webkitDisplayingFullscreen', function () { return current === this; });\n"
+    @"  }\n"
+    @"\n"
+    @"  window.addEventListener('message', function (event) {\n"
+    @"    var data = event.data;\n"
+    @"    if (!data || typeof data !== 'object' || !data.__tvfs) { return; }\n"
+    @"    if (data.__tvfs === 'exitChild') {\n"
+    @"      exit(false);\n"
+    @"      return;\n"
+    @"    }\n"
+    @"    var frames = document.getElementsByTagName('iframe');\n"
+    @"    for (var i = 0; i < frames.length; i++) {\n"
+    @"      if (frames[i].contentWindow !== event.source) { continue; }\n"
+    @"      if (data.__tvfs === 'enter') {\n"
+    @"        enter(frames[i]);\n"
+    @"      } else if (data.__tvfs === 'exit' && current === frames[i]) {\n"
+    @"        exit(true);\n"
+    @"      }\n"
+    @"      break;\n"
+    @"    }\n"
+    @"  });\n"
+    @"\n"
+    @"  window.__tvfsExitIfActive = function () {\n"
+    @"    if (!current) { return false; }\n"
+    @"    exit(true);\n"
+    @"    return true;\n"
+    @"  };\n"
+    @"})();\n"
+    ;
+}
+
+static NSString *BrowserRemotePlayPauseScript(void) {
+    // Lets the remote Play/Pause button toggle the video on the page.
+    return
+    @"(function () {\n"
+    @"  if (window.__tvppInstalled) { return; }\n"
+    @"  window.__tvppInstalled = true;\n"
+    @"\n"
+    @"  // A press that the system already turned into play/pause (Now Playing)\n"
+    @"  // shows up as a media event just before ours; do not toggle it back.\n"
+    @"  var SYSTEM_HANDLED_WINDOW_MS = 700;\n"
+    @"  var lastVideo = null;\n"
+    @"  var lastMediaEventAt = 0;\n"
+    @"  var childFrame = null;\n"
+    @"  var childMediaEventAt = 0;\n"
+    @"\n"
+    @"  function now() { return Date.now(); }\n"
+    @"\n"
+    @"  function isUsable(video) {\n"
+    @"    return !!video && video.isConnected && !video.ended && (video.currentTime > 0 || !video.paused);\n"
+    @"  }\n"
+    @"\n"
+    @"  function onMediaEvent(event) {\n"
+    @"    var target = event.target;\n"
+    @"    if (!target || target.tagName !== 'VIDEO') { return; }\n"
+    @"    if (event.type === 'play' || event.type === 'playing') { lastVideo = target; }\n"
+    @"    lastMediaEventAt = now();\n"
+    @"    if (window.parent !== window) {\n"
+    @"      try { window.top.postMessage({ __tvpp: 'media' }, '*'); } catch (e) {}\n"
+    @"    }\n"
+    @"  }\n"
+    @"  ['play', 'playing', 'pause'].forEach(function (name) {\n"
+    @"    document.addEventListener(name, onMediaEvent, true);\n"
+    @"  });\n"
+    @"\n"
+    @"  function toggleOwn() {\n"
+    @"    if (lastVideo.paused) {\n"
+    @"      var promise = lastVideo.play();\n"
+    @"      if (promise && promise.catch) { promise.catch(function () {}); }\n"
+    @"    } else {\n"
+    @"      lastVideo.pause();\n"
+    @"    }\n"
+    @"  }\n"
+    @"\n"
+    @"  window.addEventListener('message', function (event) {\n"
+    @"    var data = event.data;\n"
+    @"    if (!data || typeof data !== 'object' || !data.__tvpp) { return; }\n"
+    @"    if (data.__tvpp === 'media' && window.top === window) {\n"
+    @"      childFrame = event.source;\n"
+    @"      childMediaEventAt = now();\n"
+    @"    } else if (data.__tvpp === 'toggle' && isUsable(lastVideo)) {\n"
+    @"      toggleOwn();\n"
+    @"    }\n"
+    @"  });\n"
+    @"\n"
+    @"  // Called by the app on a Play/Pause press. Returns 'handled' when a video\n"
+    @"  // on the page took the press, '' when the app should show its Quick Menu.\n"
+    @"  window.__tvppToggle = function () {\n"
+    @"    if (isUsable(lastVideo)) {\n"
+    @"      if (now() - lastMediaEventAt > SYSTEM_HANDLED_WINDOW_MS) { toggleOwn(); }\n"
+    @"      return 'handled';\n"
+    @"    }\n"
+    @"    if (childFrame) {\n"
+    @"      if (now() - childMediaEventAt > SYSTEM_HANDLED_WINDOW_MS) {\n"
+    @"        try { childFrame.postMessage({ __tvpp: 'toggle' }, '*'); } catch (e) { return ''; }\n"
+    @"      }\n"
+    @"      return 'handled';\n"
+    @"    }\n"
+    @"    return '';\n"
+    @"  };\n"
+    @"})();\n"
+    ;
+}
+
 static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
     if (configuration == nil) {
         return;
@@ -480,6 +704,18 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
     userScript = ((id (*)(id, SEL, id, NSInteger, BOOL))objc_msgSend)(userScript, userScriptInitializer, BrowserYouTubeRequestCaptureScript(), 0, NO);
     if (userScript != nil) {
         ((void (*)(id, SEL, id))objc_msgSend)(userContentController, addUserScriptSelector, userScript);
+    }
+
+    id fullscreenScript = ((id (*)(id, SEL))objc_msgSend)((id)userScriptClass, @selector(alloc));
+    fullscreenScript = ((id (*)(id, SEL, id, NSInteger, BOOL))objc_msgSend)(fullscreenScript, userScriptInitializer, BrowserFullscreenEmulationScript(), 0, NO);
+    if (fullscreenScript != nil) {
+        ((void (*)(id, SEL, id))objc_msgSend)(userContentController, addUserScriptSelector, fullscreenScript);
+    }
+
+    id playPauseScript = ((id (*)(id, SEL))objc_msgSend)((id)userScriptClass, @selector(alloc));
+    playPauseScript = ((id (*)(id, SEL, id, NSInteger, BOOL))objc_msgSend)(playPauseScript, userScriptInitializer, BrowserRemotePlayPauseScript(), 0, NO);
+    if (playPauseScript != nil) {
+        ((void (*)(id, SEL, id))objc_msgSend)(userContentController, addUserScriptSelector, playPauseScript);
     }
 }
 
@@ -652,6 +888,21 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
     if (self.runtimeWebView != nil && [self.runtimeWebView respondsToSelector:selector]) {
         ((id (*)(id, SEL))objc_msgSend)(self.runtimeWebView, selector);
     }
+}
+
+- (void)evaluateJavaScript:(NSString *)script completion:(void (^)(id _Nullable result))completion {
+    SEL selector = NSSelectorFromString(@"evaluateJavaScript:completionHandler:");
+    if (script.length == 0 || self.runtimeWebView == nil || ![self.runtimeWebView respondsToSelector:selector]) {
+        if (completion != nil) {
+            completion(nil);
+        }
+        return;
+    }
+    ((void (*)(id, SEL, id, id))objc_msgSend)(self.runtimeWebView, selector, script, ^(id result, NSError *error) {
+        if (completion != nil) {
+            completion(error == nil ? result : nil);
+        }
+    });
 }
 
 - (NSString *)stringByEvaluatingJavaScriptFromString:(NSString *)script {

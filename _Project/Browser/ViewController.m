@@ -657,6 +657,22 @@ static UIColor *kTextColor(void) {
 }
 
 - (void)browserRemoteInputControllerHandleMenuPress {
+    if (self.presentedViewController != nil) {
+        [self browserHandleMenuPressDefault];
+        return;
+    }
+    // Leave emulated page fullscreen first; otherwise fall back to back/exit.
+    __weak typeof(self) weakSelf = self;
+    [self.webview evaluateJavaScript:@"(window.__tvfsExitIfActive && window.__tvfsExitIfActive()) ? 'exited' : ''"
+                          completion:^(id result) {
+        if ([result isKindOfClass:NSString.class] && [result isEqualToString:@"exited"]) {
+            return;
+        }
+        [weakSelf browserHandleMenuPressDefault];
+    }];
+}
+
+- (void)browserHandleMenuPressDefault {
     UIAlertController *alertController = (UIAlertController *)self.presentedViewController;
     if (alertController != nil) {
         [self.presentedViewController dismissViewControllerAnimated:YES completion:nil];
@@ -677,12 +693,20 @@ static UIColor *kTextColor(void) {
 }
 
 - (void)browserRemoteInputControllerHandlePlayPausePress {
-    UIAlertController *alertController = (UIAlertController *)self.presentedViewController;
-    if (alertController != nil) {
+    if (self.presentedViewController != nil) {
         [self.presentedViewController dismissViewControllerAnimated:YES completion:nil];
-    } else {
-        [self requestURLorSearchInput];
+        return;
     }
+    // Play/Pause toggles the video on the page; the Quick Menu opens only
+    // when the page has no video to control.
+    __weak typeof(self) weakSelf = self;
+    [self.webview evaluateJavaScript:@"window.__tvppToggle ? window.__tvppToggle() : ''"
+                          completion:^(id result) {
+        if ([result isKindOfClass:NSString.class] && [result isEqualToString:@"handled"]) {
+            return;
+        }
+        [weakSelf requestURLorSearchInput];
+    }];
 }
 
 - (void)browserRemoteInputControllerHandleAdvancedMenuPress {
