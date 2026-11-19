@@ -11,6 +11,36 @@
 #import "BrowserWebView.h"
 
 @interface AppDelegate ()
+- (void)restoreCookiesFromDefaults;
+- (void)saveCookiesToDefaults;
+@end
+
+// tvOS 27 terminates apps that do not adopt the UIScene lifecycle.
+@interface SceneDelegate : UIResponder <UIWindowSceneDelegate>
+@property (strong, nonatomic) UIWindow *window;
+@end
+
+@implementation SceneDelegate
+
+- (AppDelegate *)appDelegate {
+    return (AppDelegate *)UIApplication.sharedApplication.delegate;
+}
+
+- (void)sceneDidBecomeActive:(UIScene *)scene {
+    [[self appDelegate] restoreCookiesFromDefaults];
+}
+
+- (void)sceneWillResignActive:(UIScene *)scene {
+    [[self appDelegate] saveCookiesToDefaults];
+}
+
+- (void)sceneWillEnterForeground:(UIScene *)scene {
+    [[self appDelegate] restoreCookiesFromDefaults];
+}
+
+- (void)sceneDidEnterBackground:(UIScene *)scene {
+    [[self appDelegate] saveCookiesToDefaults];
+}
 
 @end
 
@@ -50,6 +80,13 @@
     }
     [self restoreCookiesFromDefaults];
 	return YES;
+}
+
+- (UISceneConfiguration *)application:(UIApplication *)application configurationForConnectingSceneSession:(UISceneSession *)connectingSceneSession options:(UISceneConnectionOptions *)options {
+    UISceneConfiguration *configuration = [[UISceneConfiguration alloc] initWithName:@"Default Configuration" sessionRole:connectingSceneSession.role];
+    configuration.delegateClass = SceneDelegate.class;
+    configuration.storyboard = [UIStoryboard storyboardWithName:@"Main" bundle:nil];
+    return configuration;
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {
