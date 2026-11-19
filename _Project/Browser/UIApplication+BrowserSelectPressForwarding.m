@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 
 NSString * const BrowserGlobalSelectPressEndedNotification = @"BrowserGlobalSelectPressEndedNotification";
+NSString * const BrowserGlobalSelectPressBeganNotification = @"BrowserGlobalSelectPressBeganNotification";
 static BOOL sBrowserNativeScrubTracking = NO;
 static CGFloat sBrowserNativePendingScrubPixels = 0.0;
 static CGPoint sBrowserNativeLastTouchLocation = {0, 0};
@@ -252,6 +253,12 @@ static UIViewController *BrowserFindPresentedNativeVideoPlayerViewController(UIA
     [self browser_sendEvent:event];
 
     for (UIPress *press in presses) {
+        if (press.type == UIPressTypeSelect && press.phase == UIPressPhaseBegan) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:BrowserGlobalSelectPressBeganNotification object:nil];
+            });
+            break;
+        }
         if (press.type == UIPressTypeSelect && press.phase == UIPressPhaseEnded) {
             NSLog(@"[InputTrace][App] post BrowserGlobalSelectPressEndedNotification");
             dispatch_async(dispatch_get_main_queue(), ^{

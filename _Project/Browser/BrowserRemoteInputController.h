@@ -24,6 +24,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)browserRemoteInputControllerSetWebInteractionEnabled:(BOOL)enabled;
 - (void)browserRemoteInputControllerPersistSession;
 
+@optional
+- (BOOL)browserRemoteInputControllerPageFullscreenActive;
+- (void)browserRemoteInputControllerSeekBy:(NSTimeInterval)seconds;
+- (void)browserRemoteInputControllerHandleLongSelectAtCursorPoint:(CGPoint)point cursorVisible:(BOOL)cursorVisible;
+
 @end
 
 @interface BrowserRemoteInputController : NSObject
@@ -39,6 +44,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)init NS_UNAVAILABLE;
 
 - (void)handleGlobalSelectPressEndedNotification;
+- (void)handleSelectPressBegan;
 - (void)handlePressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event;
 - (BOOL)handlePressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event;
 - (BOOL)handleTouchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event;

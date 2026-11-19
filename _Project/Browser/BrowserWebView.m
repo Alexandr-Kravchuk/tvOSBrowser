@@ -489,6 +489,26 @@ static NSString *BrowserFullscreenEmulationScript(void) {
     @"    });\n"
     @"  }\n"
     @"\n"
+    @"  function notifyNative(active) {\n"
+    @"    if (window.top !== window) { return; }\n"
+    @"    try { window.webkit.messageHandlers.tvfs.postMessage(active); } catch (e) {}\n"
+    @"  }\n"
+    @"\n"
+    @"  function seekLocal(seconds) {\n"
+    @"    var element = current;\n"
+    @"    if (!element) { return false; }\n"
+    @"    if (element.tagName === 'IFRAME') {\n"
+    @"      try { element.contentWindow.postMessage({ __tvfs: 'seek', by: seconds }, '*'); } catch (e) { return false; }\n"
+    @"      return true;\n"
+    @"    }\n"
+    @"    var video = element.tagName === 'VIDEO' ? element : element.querySelector('video');\n"
+    @"    if (!video) { return false; }\n"
+    @"    var target = video.currentTime + seconds;\n"
+    @"    if (isFinite(video.duration)) { target = Math.min(target, video.duration - 0.5); }\n"
+    @"    video.currentTime = Math.max(0, target);\n"
+    @"    return true;\n"
+    @"  }\n"
+    @"\n"
     @"  function postToParent(kind) {\n"
     @"    if (window.parent === window) { return; }\n"
     @"    try { window.parent.postMessage({ __tvfs: kind }, '*'); } catch (e) {}\n"
@@ -512,6 +532,7 @@ static NSString *BrowserFullscreenEmulationScript(void) {
     @"    element.classList.remove('__tvfs_active');\n"
     @"    document.documentElement.classList.remove('__tvfs_lock');\n"
     @"    current = null;\n"
+    @"    notifyNative(false);\n"
     @"    restoreScroll();\n"
     @"    if (element.tagName === 'IFRAME' && element.contentWindow) {\n"
     @"      try { element.contentWindow.postMessage({ __tvfs: 'exitChild' }, '*'); } catch (e) {}\n"
@@ -528,6 +549,7 @@ static NSString *BrowserFullscreenEmulationScript(void) {
     @"    current = element;\n"
     @"    element.classList.add('__tvfs_active');\n"
     @"    document.documentElement.classList.add('__tvfs_lock');\n"
+    @"    notifyNative(true);\n"
     @"    postToParent('enter');\n"
     @"    fire(element);\n"
     @"  }\n"
@@ -575,6 +597,15 @@ static NSString *BrowserFullscreenEmulationScript(void) {
     @"      exit(false);\n"
     @"      return;\n"
     @"    }\n"
+    @"    if (data.__tvfs === 'enterHere') {\n"
+    @"      var video = pickVideo();\n"
+    @"      if (video) { enter(video); }\n"
+    @"      return;\n"
+    @"    }\n"
+    @"    if (data.__tvfs === 'seek') {\n"
+    @"      seekLocal(Number(data.by) || 0);\n"
+    @"      return;\n"
+    @"    }\n"
     @"    var frames = document.getElementsByTagName('iframe');\n"
     @"    for (var i = 0; i < frames.length; i++) {\n"
     @"      if (frames[i].contentWindow !== event.source) { continue; }\n"
@@ -586,6 +617,67 @@ static NSString *BrowserFullscreenEmulationScript(void) {
     @"      break;\n"
     @"    }\n"
     @"  });\n"
+    @"\n"
+    @"  function visibleArea(element) {\n"
+    @"    var rect = element.getBoundingClientRect();\n"
+    @"    var width = Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0);\n"
+    @"    var height = Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0);\n"
+    @"    return width > 0 && height > 0 ? width * height : 0;\n"
+    @"  }\n"
+    @"\n"
+    @"  function pickVideo() {\n"
+    @"    var videos = Array.prototype.slice.call(document.querySelectorAll('video'));\n"
+    @"    var playing = videos.filter(function (video) { return !video.paused && !video.ended; });\n"
+    @"    var pool = (playing.length ? playing : videos).filter(function (video) { return visibleArea(video) > 0; });\n"
+    @"    pool.sort(function (a, b) { return visibleArea(b) - visibleArea(a); });\n"
+    @"    return pool[0] || null;\n"
+    @"  }\n"
+    @"\n"
+    @"  function containsPoint(element, x, y) {\n"
+    @"    var rect = element.getBoundingClientRect();\n"
+    @"    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;\n"
+    @"  }\n"
+    @"\n"
+    @"  // The video (or the iframe with a player) under the given viewport point;\n"
+    @"  // overlays on top of a video still resolve to that video.\n"
+    @"  function mediaAt(x, y) {\n"
+    @"    var element = document.elementFromPoint(x, y);\n"
+    @"    if (element && (element.tagName === 'VIDEO' || element.tagName === 'IFRAME')) { return element; }\n"
+    @"    var candidates = document.querySelectorAll('video, iframe');\n"
+    @"    for (var i = 0; i < candidates.length; i++) {\n"
+    @"      if (visibleArea(candidates[i]) > 0 && containsPoint(candidates[i], x, y)) { return candidates[i]; }\n"
+    @"    }\n"
+    @"    return null;\n"
+    @"  }\n"
+    @"\n"
+    @"  function askFrameToEnter(frameWindow) {\n"
+    @"    try { frameWindow.postMessage({ __tvfs: 'enterHere' }, '*'); } catch (e) { return false; }\n"
+    @"    return true;\n"
+    @"  }\n"
+    @"\n"
+    @"  function enterTarget(target) {\n"
+    @"    if (target.tagName === 'IFRAME') { return askFrameToEnter(target.contentWindow); }\n"
+    @"    enter(target);\n"
+    @"    return true;\n"
+    @"  }\n"
+    @"\n"
+    @"  // Long press on the remote: leave fullscreen, or put the video under the\n"
+    @"  // cursor (fx/fy are fractions of the viewport, -1 when unknown) or the\n"
+    @"  // playing one into fullscreen.\n"
+    @"  window.__tvfsToggleAt = function (fx, fy) {\n"
+    @"    if (current) { exit(true); return 'exited'; }\n"
+    @"    var target = null;\n"
+    @"    if (fx >= 0 && fy >= 0) { target = mediaAt(fx * window.innerWidth, fy * window.innerHeight); }\n"
+    @"    if (!target) { target = pickVideo(); }\n"
+    @"    if (target) { return enterTarget(target) ? 'entered' : ''; }\n"
+    @"    // A player inside a (cross-origin) frame that reported playback.\n"
+    @"    if (window.__tvppMediaFrame) { return askFrameToEnter(window.__tvppMediaFrame) ? 'entered' : ''; }\n"
+    @"    return '';\n"
+    @"  };\n"
+    @"\n"
+    @"  window.__tvfsSeekBy = function (seconds) {\n"
+    @"    return seekLocal(seconds) ? 'handled' : '';\n"
+    @"  };\n"
     @"\n"
     @"  window.__tvfsExitIfActive = function () {\n"
     @"    if (!current) { return false; }\n"
@@ -644,6 +736,7 @@ static NSString *BrowserRemotePlayPauseScript(void) {
     @"    if (!data || typeof data !== 'object' || !data.__tvpp) { return; }\n"
     @"    if (data.__tvpp === 'media' && window.top === window) {\n"
     @"      childFrame = event.source;\n"
+    @"      window.__tvppMediaFrame = event.source;\n"
     @"      childMediaEventAt = now();\n"
     @"    } else if (data.__tvpp === 'toggle' && isUsable(lastVideo)) {\n"
     @"      toggleOwn();\n"
@@ -719,13 +812,31 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
     }
 }
 
+NSNotificationName const BrowserWebViewPageFullscreenDidChangeNotification = @"BrowserWebViewPageFullscreenDidChangeNotification";
+
+// Script message handlers are retained by the user content controller, so
+// route messages through a weak proxy to avoid a retain cycle.
+@interface BrowserScriptMessageProxy : NSObject
+@property (nonatomic, weak) BrowserWebView *target;
+@end
+
 @interface BrowserWebView ()
+- (void)handlePageFullscreenMessage:(id)body;
 
 @property (nullable, nonatomic, strong) id runtimeWebView;
 @property (nullable, nonatomic, strong) NSURLRequest *lastRequest;
 @property (nullable, nonatomic, copy) NSString *lastTitle;
 @property (nonatomic, copy) NSString *userAgent;
 @property (nonatomic) BOOL loading;
+@property (nonatomic, readwrite) BOOL pageFullscreenActive;
+
+@end
+
+@implementation BrowserScriptMessageProxy
+
+- (void)userContentController:(id)userContentController didReceiveScriptMessage:(id)message {
+    [self.target handlePageFullscreenMessage:[message valueForKey:@"body"]];
+}
 
 @end
 
@@ -771,6 +882,7 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
     }
     BrowserConfigurePrivateMediaPreferences(configuration);
     BrowserInstallYouTubeCaptureUserScript(configuration);
+    [self installPageFullscreenMessageHandlerInConfiguration:configuration];
 
     id webViewObject = ((id (*)(id, SEL))objc_msgSend)((id)webViewClass, @selector(alloc));
     SEL initializer = NSSelectorFromString(@"initWithFrame:configuration:");
@@ -797,6 +909,43 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
 
     [self addSubview:runtimeView];
     [self setUserAgent:userAgent];
+}
+
+- (void)installPageFullscreenMessageHandlerInConfiguration:(id)configuration {
+    SEL userContentControllerGetter = NSSelectorFromString(@"userContentController");
+    SEL addHandlerSelector = NSSelectorFromString(@"addScriptMessageHandler:name:");
+    if (configuration == nil || ![configuration respondsToSelector:userContentControllerGetter]) {
+        return;
+    }
+    id userContentController = ((id (*)(id, SEL))objc_msgSend)(configuration, userContentControllerGetter);
+    if (userContentController == nil || ![userContentController respondsToSelector:addHandlerSelector]) {
+        return;
+    }
+    Protocol *handlerProtocol = objc_getProtocol("WKScriptMessageHandler");
+    if (handlerProtocol != NULL && ![BrowserScriptMessageProxy conformsToProtocol:handlerProtocol]) {
+        class_addProtocol(BrowserScriptMessageProxy.class, handlerProtocol);
+    }
+    BrowserScriptMessageProxy *proxy = [BrowserScriptMessageProxy new];
+    proxy.target = self;
+    ((void (*)(id, SEL, id, id))objc_msgSend)(userContentController, addHandlerSelector, proxy, @"tvfs");
+}
+
+- (void)handlePageFullscreenMessage:(id)body {
+    BOOL active = [body respondsToSelector:@selector(boolValue)] && [body boolValue];
+    [self setPageFullscreenActiveAndNotify:active];
+}
+
+- (void)setPageFullscreenActiveAndNotify:(BOOL)active {
+    if (self.pageFullscreenActive == active) {
+        return;
+    }
+    self.pageFullscreenActive = active;
+    [[NSNotificationCenter defaultCenter] postNotificationName:BrowserWebViewPageFullscreenDidChangeNotification object:self];
+}
+
+- (void)seekPageVideoBy:(NSTimeInterval)seconds {
+    NSString *script = [NSString stringWithFormat:@"window.__tvfsSeekBy ? window.__tvfsSeekBy(%.1f) : ''", seconds];
+    [self evaluateJavaScript:script completion:nil];
 }
 
 - (void)layoutSubviews {
@@ -1140,6 +1289,7 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
 }
 
 - (void)webView:(id)webView didStartProvisionalNavigation:(id)navigation {
+    [self setPageFullscreenActiveAndNotify:NO];
     self.loading = YES;
     if ([self.delegate respondsToSelector:@selector(webViewDidStartLoad:)]) {
         [self.delegate webViewDidStartLoad:self];

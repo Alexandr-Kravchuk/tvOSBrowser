@@ -13,6 +13,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+extern NSNotificationName const BrowserWebViewPageFullscreenDidChangeNotification;
+
 @interface BrowserWebView : UIView
 
 @property (nullable, nonatomic, weak) id<BrowserWebViewDelegate> delegate;
@@ -23,6 +25,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly, getter=canGoForward) BOOL canGoForward;
 @property (nonatomic, readonly, getter=isLoading) BOOL loading;
 @property (nonatomic) BOOL scalesPageToFit;
+/// YES while the page shows a video in the emulated (CSS) fullscreen.
+@property (nonatomic, readonly) BOOL pageFullscreenActive;
 
 - (instancetype)initWithUserAgent:(NSString * _Nullable)userAgent
       allowsInlineMediaPlayback:(BOOL)allowsInlineMediaPlayback NS_DESIGNATED_INITIALIZER;
@@ -36,6 +40,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSString * _Nonnull)runtimeMediaPreferenceReport;
 - (void)setUserAgent:(NSString * _Nullable)userAgent;
 - (void)pauseAllMediaPlayback;
+- (void)seekPageVideoBy:(NSTimeInterval)seconds;
 
 + (nullable NSData *)cookieDataRepresentation;
 + (NSArray<NSHTTPCookie *> * _Nonnull)allCookies;

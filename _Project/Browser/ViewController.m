@@ -21,6 +21,7 @@
 #import "ViewController.h"
 
 static NSString * const kBrowserGlobalSelectPressEndedNotification = @"BrowserGlobalSelectPressEndedNotification";
+static NSString * const kBrowserGlobalSelectPressBeganNotification = @"BrowserGlobalSelectPressBeganNotification";
 
 static UIColor *kTextColor(void) {
     if (@available(tvOS 13, *)) {
@@ -116,6 +117,10 @@ static UIColor *kTextColor(void) {
                                              selector:@selector(handleGlobalSelectPressEndedNotification:)
                                                  name:kBrowserGlobalSelectPressEndedNotification
                                                object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleGlobalSelectPressBeganNotification:)
+                                                 name:kBrowserGlobalSelectPressBeganNotification
+                                               object:nil];
 
     [self.tabCoordinator restoreInitialStateOrCreateFirstTab];
 }
@@ -152,6 +157,11 @@ static UIColor *kTextColor(void) {
 - (void)handleApplicationWillTerminate:(NSNotification *)notification {
     (void)notification;
     [self.tabCoordinator persistSession];
+}
+
+- (void)handleGlobalSelectPressBeganNotification:(NSNotification *)notification {
+    (void)notification;
+    [self.remoteInputController handleSelectPressBegan];
 }
 
 - (void)handleGlobalSelectPressEndedNotification:(NSNotification *)notification {
@@ -690,6 +700,31 @@ static UIColor *kTextColor(void) {
         [alert addAction:[UIAlertAction actionWithTitle:@"Dismiss" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];
     }
+}
+
+- (void)browserRemoteInputControllerHandleLongSelectAtCursorPoint:(CGPoint)point cursorVisible:(BOOL)cursorVisible {
+    CGFloat fx = -1;
+    CGFloat fy = -1;
+    CGRect bounds = self.webview.bounds;
+    if (cursorVisible && CGRectGetWidth(bounds) > 0 && CGRectGetHeight(bounds) > 0) {
+        CGPoint webPoint = [self.view convertPoint:point toView:self.webview];
+        fx = webPoint.x / CGRectGetWidth(bounds);
+        fy = webPoint.y / CGRectGetHeight(bounds);
+        if (fx < 0 || fx > 1 || fy < 0 || fy > 1) {
+            fx = -1;
+            fy = -1;
+        }
+    }
+    NSString *script = [NSString stringWithFormat:@"window.__tvfsToggleAt ? window.__tvfsToggleAt(%.4f, %.4f) : ''", fx, fy];
+    [self.webview evaluateJavaScript:script completion:nil];
+}
+
+- (BOOL)browserRemoteInputControllerPageFullscreenActive {
+    return self.webview.pageFullscreenActive;
+}
+
+- (void)browserRemoteInputControllerSeekBy:(NSTimeInterval)seconds {
+    [self.webview seekPageVideoBy:seconds];
 }
 
 - (void)browserRemoteInputControllerHandlePlayPausePress {

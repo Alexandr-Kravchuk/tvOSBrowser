@@ -1,4 +1,5 @@
 #import "BrowserRemoteInputController.h"
+#import "BrowserWebView.h"
 
 static UIImage *BrowserDefaultCursor(void) {
     static UIImage *image;
@@ -60,6 +61,10 @@ static NSString *BrowserPressPhaseString(UIPressPhase phase) {
 @property (nonatomic) BOOL awaitingSecondSelectPress;
 @property (nonatomic) BOOL hoverUpdateScheduled;
 @property (nonatomic) BOOL hoverUpdateNeedsRerun;
+@property (nonatomic) CGFloat pendingSeekSeconds;
+@property (nonatomic) BOOL longSelectPending;
+@property (nonatomic) BOOL longSelectFired;
+@property (nonatomic) UILabel *seekLabel;
 
 @end
 
@@ -88,8 +93,20 @@ static NSString *BrowserPressPhaseString(UIPressPhase phase) {
         _manualScrollPanRecognizer.cancelsTouchesInView = NO;
         _manualScrollPanRecognizer.enabled = NO;
         [rootView addGestureRecognizer:_manualScrollPanRecognizer];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(pageFullscreenDidChange:)
+                                                     name:BrowserWebViewPageFullscreenDidChangeNotification
+                                                   object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)pageFullscreenDidChange:(NSNotification *)notification {
+    [self refreshInteractionState];
 }
 
 - (void)setCursorModeEnabled:(BOOL)cursorModeEnabled {
@@ -109,7 +126,7 @@ static NSString *BrowserPressPhaseString(UIPressPhase phase) {
     BOOL shouldAllowWebInteraction = !self.cursorModeEnabled &&
         ![self.host browserRemoteInputControllerTabOverviewVisible] &&
         !topBarFocusActive;
-    scrollView.scrollEnabled = shouldAllowWebInteraction;
+    scrollView.scrollEnabled = shouldAllowWebInteraction && ![self pageFullscreenActive];
     self.manualScrollPanRecognizer.enabled = shouldAllowWebInteraction;
     [self.host browserRemoteInputControllerSetWebInteractionEnabled:shouldAllowWebInteraction];
     self.cursorView.hidden = !self.cursorModeEnabled ||
@@ -218,7 +235,46 @@ static NSString *BrowserPressPhaseString(UIPressPhase phase) {
     [self.host browserRemoteInputControllerHandlePrimaryAction];
 }
 
+// Holding Select for half a second toggles video fullscreen; the click
+// that would follow on release is swallowed.
+- (void)handleSelectPressBegan {
+    if (self.longSelectPending) {
+        return;
+    }
+    self.longSelectPending = YES;
+    self.longSelectFired = NO;
+    [self performSelector:@selector(fireLongSelectPress) withObject:nil afterDelay:0.5];
+}
+
+- (void)fireLongSelectPress {
+    self.longSelectPending = NO;
+    if ([self.host browserRemoteInputControllerPresentedViewController] != nil ||
+        [self.host browserRemoteInputControllerTabOverviewVisible] ||
+        [self.host browserRemoteInputControllerTopBarFocusActive] ||
+        ![self.host respondsToSelector:@selector(browserRemoteInputControllerHandleLongSelectAtCursorPoint:cursorVisible:)]) {
+        return;
+    }
+    self.longSelectFired = YES;
+    self.awaitingSecondSelectPress = NO;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(handleDeferredSelectPressAction) object:nil];
+    [self.host browserRemoteInputControllerHandleLongSelectAtCursorPoint:self.cursorView.frame.origin
+                                                           cursorVisible:self.cursorModeEnabled];
+}
+
+- (BOOL)consumeLongSelectPress {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(fireLongSelectPress) object:nil];
+    self.longSelectPending = NO;
+    if (!self.longSelectFired) {
+        return NO;
+    }
+    self.longSelectFired = NO;
+    return YES;
+}
+
 - (void)handleSelectPressEnded {
+    if ([self consumeLongSelectPress]) {
+        return;
+    }
     CFTimeInterval now = CACurrentMediaTime();
     if (self.awaitingSecondSelectPress && (now - self.lastSelectPressTimestamp) < 0.35) {
         self.awaitingSecondSelectPress = NO;
@@ -250,10 +306,90 @@ static NSString *BrowserPressPhaseString(UIPressPhase phase) {
     [self.host browserRemoteInputControllerHandleAdvancedMenuPress];
 }
 
+- (BOOL)pageFullscreenActive {
+    return [self.host respondsToSelector:@selector(browserRemoteInputControllerPageFullscreenActive)] &&
+        [self.host browserRemoteInputControllerPageFullscreenActive];
+}
+
+- (UILabel *)seekLabel {
+    if (_seekLabel == nil) {
+        _seekLabel = [UILabel new];
+        _seekLabel.font = [UIFont monospacedDigitSystemFontOfSize:48 weight:UIFontWeightSemibold];
+        _seekLabel.textColor = UIColor.whiteColor;
+        _seekLabel.textAlignment = NSTextAlignmentCenter;
+        _seekLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+        _seekLabel.layer.cornerRadius = 20;
+        _seekLabel.clipsToBounds = YES;
+        _seekLabel.hidden = YES;
+        [self.rootView addSubview:_seekLabel];
+    }
+    return _seekLabel;
+}
+
+- (void)showSeekLabel {
+    NSInteger seconds = (NSInteger)lround(self.pendingSeekSeconds);
+    UILabel *label = self.seekLabel;
+    label.text = [NSString stringWithFormat:@"%@ %@%ld s", seconds < 0 ? @"⏪" : @"⏩", seconds < 0 ? @"−" : @"+", (long)labs(seconds)];
+    [label sizeToFit];
+    CGRect bounds = self.rootView.bounds;
+    CGSize size = CGSizeMake(label.bounds.size.width + 60, label.bounds.size.height + 30);
+    label.frame = CGRectMake((CGRectGetWidth(bounds) - size.width) / 2.0, CGRectGetHeight(bounds) - size.height - 80, size.width, size.height);
+    [self.rootView bringSubviewToFront:label];
+    label.alpha = 1.0;
+    label.hidden = NO;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideSeekLabel) object:nil];
+}
+
+- (void)hideSeekLabel {
+    [UIView animateWithDuration:0.3 animations:^{
+        self.seekLabel.alpha = 0.0;
+    } completion:^(BOOL finished) {
+        if (finished) {
+            self.seekLabel.hidden = YES;
+        }
+    }];
+}
+
+// In the emulated video fullscreen there is nothing to scroll, so in scroll
+// mode a horizontal swipe seeks the video instead (applied on release).
+- (void)handleSeekPan:(UIPanGestureRecognizer *)gestureRecognizer {
+    static CGFloat const kSeekSecondsPerPoint = 0.05;
+    if (gestureRecognizer.state == UIGestureRecognizerStateBegan) {
+        [self stopManualScrollInertia];
+        self.pendingSeekSeconds = 0;
+    }
+
+    CGPoint translation = [gestureRecognizer translationInView:self.rootView];
+    if (translation.x != 0) {
+        self.pendingSeekSeconds += translation.x * kSeekSecondsPerPoint;
+        [gestureRecognizer setTranslation:CGPointZero inView:self.rootView];
+        if (fabs(self.pendingSeekSeconds) >= 1.0) {
+            [self showSeekLabel];
+        }
+    }
+
+    if (gestureRecognizer.state == UIGestureRecognizerStateEnded ||
+        gestureRecognizer.state == UIGestureRecognizerStateCancelled ||
+        gestureRecognizer.state == UIGestureRecognizerStateFailed) {
+        CGFloat seconds = round(self.pendingSeekSeconds);
+        self.pendingSeekSeconds = 0;
+        if (gestureRecognizer.state == UIGestureRecognizerStateEnded && fabs(seconds) >= 1.0 &&
+            [self.host respondsToSelector:@selector(browserRemoteInputControllerSeekBy:)]) {
+            [self.host browserRemoteInputControllerSeekBy:seconds];
+        }
+        [self performSelector:@selector(hideSeekLabel) withObject:nil afterDelay:0.6];
+    }
+}
+
 - (void)handleManualScrollPan:(UIPanGestureRecognizer *)gestureRecognizer {
     if (self.cursorModeEnabled ||
         [self.host browserRemoteInputControllerTabOverviewVisible] ||
         [self.host browserRemoteInputControllerTopBarFocusActive]) {
+        return;
+    }
+
+    if ([self pageFullscreenActive]) {
+        [self handleSeekPan:gestureRecognizer];
         return;
     }
 
@@ -286,6 +422,10 @@ static NSString *BrowserPressPhaseString(UIPressPhase phase) {
 
 - (void)handlePressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
     UIPress *press = presses.anyObject;
+    if (press != nil && press.type == UIPressTypeSelect &&
+        [self.host browserRemoteInputControllerPresentedViewController] == nil) {
+        [self handleSelectPressBegan];
+    }
     if (press != nil && (press.type == UIPressTypeMenu || press.type == UIPressTypePlayPause || press.type == UIPressTypeSelect)) {
         NSLog(@"[InputTrace][Root] pressesBegan type=%@ phase=%@ presented=%@",
               BrowserPressTypeString(press.type),
